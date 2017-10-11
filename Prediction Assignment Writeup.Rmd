@@ -1,0 +1,204 @@
+---
+title: "Prediction Assignment Writeup"
+author: "A. Rosa Castillo"
+date: "9 October 2017"
+output: html_document
+---
+## Summary
+The goal of this project is to generate a prediction model based on the data collected by the human activity recognition research. http://groupware.les.inf.puc-rio.br/har This group provides a dataset with sports activity information collected on 8 hours of activities of 6 healthy subjects (information from the website).
+
+Read more: http://groupware.les.inf.puc-rio.br/har#ixzz4v0QJRaBg
+
+Our purpose here it to predict the manner in which they did the exercise.
+
+## Load the datasets
+There are some not-valid #DIV/0! values, we noticed the first time we read the dataset, so we replace them as NA values.
+```{r load data, cache=TRUE, results='hide'}
+url1 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+trainingData = read.csv(url1,na.strings=c('#DIV/0', '', 'NA') ,stringsAsFactors = F)
+
+url2 <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+testData = read.csv(url2,na.strings= c('#DIV/0', '', 'NA'),stringsAsFactors = F)
+```
+
+## Exploratory Analysis
+We will perform first some exploratory analysis on the datasets. We need to perfom the same transformations in both the training and the test datasets. See outputs of the '''str''' command at the appendix of this document.
+
+```{r explore training, results = 'hide'}
+library(dplyr)
+str(trainingData)
+str(testData)
+```
+There are NA values we need to clean. Let's first decide what to do with these NA values.
+
+```{r not completed cases}
+sum(!complete.cases(trainingData))
+```
+The number of incompleted cases is too high 19216, from the total 19622. Thus we cannot perfom a radical filter to eliminate all rows containing them because we would reduce too much the samples count. However we can delete the columns with such a huge number of NAs since they will be no good predictors anyway.
+
+```{r remove columns with a lot of NAs}
+trainingCount <-sapply(trainingData, function(y) sum(length(which(is.na(y)))))
+trainingCount$name <- rownames(trainingCount) 
+trainingCount <- data.frame(trainingCount)
+# take columns with more than 19000 NA values
+columns2Delete <- trainingCount[,apply(trainingCount, MARGIN=2, function(col){any(col>19000)})]
+dim(columns2Delete)
+# we have 100 columns to delete in the training set
+reducedTrainingData <- trainingData[, ! names(trainingData) %in% names(columns2Delete)] 
+```
+We repeat the same transformation in the test set:
+```{r repeat transformation in the test, results='hide'}
+testCount <-sapply(testData, function(y) sum(length(which(is.na(y)))))
+testCount$name <- rownames(testCount) 
+testCount <- data.frame(testCount)
+# take columns with more than 19 NA values (the total number of rows is 20)
+testCols2Delete <- testCount[,apply(testCount, MARGIN=2, function(col){any(col>19)})]
+reducedTestData <- testData[, ! names(testData) %in% names(testCols2Delete)] 
+``` 
+
+By checking the classes of the dataset we still have some columns as characters.
+
+```{r Analysis character columns, results='hide'}
+characterClasses <- names(reducedTrainingData[,sapply(reducedTrainingData,is.character)])
+```
+We have four columns ''user_name'', ''cvtd_timestamp'', ''new_window'' and ''classe''. The second variable is a date so we transform it into the right type.
+
+```{r transform date, results='hide'}
+reducedTrainingData$cvtd_timestamp <- as.Date(reducedTrainingData$cvtd_timestamp, "%m/%d/%Y %H:%M")
+reducedTestData$cvtd_timestamp <- as.Date(reducedTestData$cvtd_timestamp, "%m/%d/%Y %H:%M")
+```
+
+The ''classe'' variable is the outcome so we transform the other two into factors.
+
+```{r factor variables}
+# transforming character variables into factors
+reducedTrainingData$user_name <- as.factor(reducedTrainingData$user_name)
+reducedTestData$user_name <- as.factor(reducedTestData$user_name)
+reducedTrainingData$new_window <- as.factor(reducedTrainingData$new_window)
+reducedTestData$new_window <- as.factor(reducedTestData$new_window)
+sum(reducedTrainingData$new_window == "no")
+```
+Because from 19622 observations in the training set the value  ''no''  is in 19216 ones, this variable is not going to bring a lot of information, but we will keep it for the moment.
+
+### Still variables with NA values?
+When we analyze our transformed datasets, both for training and test, we discover there are still some missing values at the test dataset for the timestamp column.
+```{r test dataset timestamp}
+sum(is.na(reducedTestData$cvtd_timestamp))
+```
+We have 12 missing values from 20 observations, thus we decide not to include this variable as predictor.
+
+## Prediction analysis
+### Removing not useful predictors and preparing the datasets for the model
+As we said before, let's remove the  ''cvtd_timestamp''  column since we discovered it may introduce many missing values, so it does not help in our predicting model. 
+Besides the  ''X''  column is just the row number so we also delete it. Finally at the test dataset there is a redundant  ''problem_id''  column which is also the same as  ''X'' , then we remove it too. 
+In addition we decide to remove the  ''user_name'' , since we want to predict just based on the results of the activity.
+
+```{r Removing not useful predictors and putting the outcome as factor, results='hide'}
+# removing not useful predictors
+library(tidyverse)
+finalTrainingData <- reducedTrainingData %>% select(-X, -user_name, -cvtd_timestamp)
+finalTestData <- reducedTestData %>% select(-X, -user_name, -cvtd_timestamp, -problem_id)
+# put the outcome as factor
+finalTrainingData$classe <- as.factor(finalTrainingData$classe)
+```
+We will keep the '''finalTestData''' for the final step of the assignment project. Notice that the test dataset has no ''classe'' column since it is our goal to predict it.
+
+Let's divide the training set into two sets to check how good is our model.
+```{r partition, results='hide'}
+library(caret)
+set.seed(1223)
+# create training and test sets 80% for training
+inTrain <- createDataPartition(y=finalTrainingData$classe,p=0.7, list=FALSE) 
+training <- finalTrainingData[inTrain,] 
+testing <- finalTrainingData[-inTrain,]
+```
+
+Let's check briefly our predictors to check if we have Zero covariates.
+```{r removing zero covariates}
+nearZeroVar(training,saveMetrics = TRUE)
+
+``` 
+
+As we suspected in the exploratory analysis part, we should remove the 'new_window' predictor since it is a poor predictor. Besides we could also remove the predictors of the timestamp columns, since if we include num_window 
+in the model, we will capture the time ordering without having to include the timestamps.
+
+```{r remove predictors, results='hide'}
+# remove predictors
+training <- training %>% select(-new_window, -raw_timestamp_part_1, -raw_timestamp_part_2)
+testing <- testing %>% select(-new_window, -raw_timestamp_part_1, -raw_timestamp_part_2)
+# repeat these transformations in the finalTestData
+finalTestData <- finalTestData %>% select(-new_window, -raw_timestamp_part_1, -raw_timestamp_part_2)
+```
+
+### Choosing a method
+We choose '''random forest''' as is one of the most used/accurate algorithms along with boosting. However when we tried to train the model with the default values, it did not end the computation. 
+Thus we will improve the performance of the calculations using a parallel approach (as recommended by https://github.com/lgreski/datasciencectacontent/blob/master/markdown/pml-randomForestPerformance.md).
+
+#### Configure parallel processing
+```{r configure parallel processing, results='hide'}
+library(parallel)
+library(doParallel)
+cluster <- makeCluster(detectCores() - 1) # convention to leave 1 core for OS
+registerDoParallel(cluster)
+```
+#### Cross validation
+We will perform cross validation using the option '''trainControl''' of the '''train''' function at the caret package. We specify 3-fold cross-validation (10-fold is very time consuming). 
+We use allowParallel = TRUE to accelerate the computing, which tells caret to use the registered cluster.
+
+```{r control 3-fold cross validation, results = 'hide'}
+library(caret)
+rf_ctrl <- trainControl(method = "cv", number = 3, allowParallel = TRUE)
+```
+#### Develop training model
+We will use some options of the model training process in caret to speed up the development of the model. For instance we use the principal component analysis (pca) option as preprocess. Besides we tried the model for different values of the ''mtry'' parameter (rumber of variables randomly sampled as candidates at each split). The accuracy results are the best for mtry = 3. These results can be achieved by calling the ''train'' function in caret with newGrid = expand.grid(mtry = c(2,3,4,5,8,15))
+```{r accuracy results, eval=FALSE}
+mtry  Accuracy   Kappa    
+   2    0.9646499  0.9552810
+   3    0.9664245  0.9575428
+   4    0.9643024  0.9548431
+   5    0.9642253  0.9547336
+   8    0.9623813  0.9524132
+  15    0.9579305  0.9467849
+```
+```{r random forest}
+modelFit <- train(training[,1:53], training[,54], method = "rf",  preProcess="pca",  tuneGrid = data.frame(mtry = 3), trainControl = rf_ctrl)
+```
+
+#### De-register parallel processing cluster
+```{r de register parallel,results='hide'}
+stopCluster(cluster)
+registerDoSEQ()
+```
+### Sample error and accuracy
+To evaluate the suitability of this model, we analyse the confusion matrix that is based on comparing the modeled data to the held out folds. We use resample to see the performance over 10 folds. Then we determine a confusion matrix based on the resampling procedure to evaluate the model. By using resampling we achieve a maximal accuracy of 0.969 which is not far of the one we reached with the current training data. Thus it is a good indicator to see not a huge variance in accuracy of the model by resampling.
+
+```{r confusion matrix}
+modelFit
+modelFit$resample
+confusionMatrix.train(modelFit)
+```
+### Some plots
+By plotting the final model we see there was no improvement in the error with a number of trees higher than 100. The default value in the train function is 500.
+
+```{r plots}
+plot(modelFit$finalModel)
+```
+
+Now we predict the outcome for the test data set using the random forest model and check the accuracy.
+
+```{r prediction and accuracy}
+library(caret)
+pred <- predict(modelFit, testing) 
+# logic value for whether or not the rf algorithm predicted correctly 
+testing$predRight <- factor(pred) == testing$classe 
+# tabulate results 
+table(pred,testing$classe)
+# print results of model 
+confusionMatrix(testing$classe,predict(modelFit,testing))
+```
+## Appendix
+
+```{r explore training2}
+str(trainingData)
+str(testData)
+```
